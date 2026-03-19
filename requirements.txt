@@ -9,3 +9,5 @@ ccxt
 py-clob-client
 numpy
 aiohttp
+pandas_ta
+py-clob-client
