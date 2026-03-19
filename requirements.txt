@@ -1,20 +1,11 @@
-# PolyBot - Hybrid Quantitative Trading Bot for Polymarket
-# Core
-py-clob-client>=0.0.1
-ccxt>=4.0.0
-anthropic>=0.40.0
-
-# Data & Analysis
-pandas>=2.0.0
-pandas_ta>=0.3.14b
-numpy>=1.24.0
-
-# Visualization & Dashboard
-plotly>=5.18.0
-streamlit>=1.30.0
-
-# Async & Networking
-aiohttp>=3.9.0
-
-# Environment
-python-dotenv>=1.0.0
+streamlit
+pandas
+plotly
+anthropic
+requests
+python-dotenv
+pandas_ta
+ccxt
+py-clob-client
+numpy
+aiohttp
