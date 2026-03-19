@@ -4,10 +4,6 @@ plotly
 anthropic
 requests
 python-dotenv
-pandas_ta
-ccxt
-py-clob-client
 numpy
 aiohttp
-pandas_ta
-py-clob-client
+ccxt
