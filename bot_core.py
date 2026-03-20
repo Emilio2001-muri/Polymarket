@@ -273,38 +273,70 @@ class PolyBot:
 
     def __init__(self):
         self.clob = None
+        self.clob_error: str = ""
         self.signal_engine = SignalEngine()
         self.claude: Optional[ClaudeAdvisor] = None
         self.running = False
         self._thread: Optional[threading.Thread] = None
 
-    # ── initialisation ──────────────────────────────────────────────────────
+    # ── CLOB client initialisation ──────────────────────────────────────────
+
+    def _load_secret(self, key: str, fallback: str = "") -> str:
+        """Load a secret from st.secrets (Streamlit Cloud) or config/env."""
+        try:
+            import streamlit as st
+            val = st.secrets.get(key, "")
+            if val:
+                return str(val)
+        except Exception:
+            pass
+        return getattr(config, key, "") or fallback
+
+    def init_clob(self):
+        """Initialise the CLOB client with proper auth. Safe to call repeatedly."""
+        self.clob_error = ""
+        pk = self._load_secret("PRIVATE_KEY", config.PRIVATE_KEY)
+        funder = self._load_secret("FUNDER_ADDRESS", config.FUNDER_ADDRESS)
+
+        if not pk:
+            self.clob_error = "PRIVATE_KEY not set"
+            add_log(f"⚠️ CLOB skip: {self.clob_error}", "WARNING")
+            return
+
+        try:
+            from py_clob_client.client import ClobClient
+
+            client = ClobClient(
+                host=config.CLOB_HOST,
+                key=pk,
+                chain_id=config.CHAIN_ID,
+                signature_type=0,
+                funder=funder or None,
+            )
+            creds = client.derive_api_key()
+            client.set_api_creds(creds)
+            self.clob = client
+            add_log("✅ CLOB client connected — LIVE mode available")
+        except Exception as exc:
+            self.clob = None
+            self.clob_error = str(exc)
+            add_log(f"⚠️ CLOB init failed: {exc}", "WARNING")
+
+    # ── full initialisation ─────────────────────────────────────────────────
 
     def initialize(self) -> bool:
         # Claude advisor
-        if config.ANTHROPIC_API_KEY:
+        api_key = self._load_secret("ANTHROPIC_API_KEY", config.ANTHROPIC_API_KEY)
+        if api_key:
             try:
+                config.ANTHROPIC_API_KEY = api_key
                 self.claude = ClaudeAdvisor()
                 add_log("✅ Claude advisor ready")
             except Exception as exc:
                 add_log(f"⚠️ Claude init failed: {exc}", "WARNING")
 
         # CLOB client
-        try:
-            from py_clob_client.client import ClobClient
-
-            self.clob = ClobClient(
-                host=config.CLOB_HOST,
-                key=config.PRIVATE_KEY,
-                chain_id=config.CHAIN_ID,
-                funder=config.FUNDER_ADDRESS,
-            )
-            creds = self.clob.derive_api_key()
-            self.clob.set_api_creds(creds)
-            add_log("✅ CLOB client connected — LIVE mode available")
-        except Exception as exc:
-            add_log(f"⚠️ CLOB init failed ({exc}). Paper‑mode only.", "WARNING")
-            self.clob = None
+        self.init_clob()
 
         with _state_lock:
             _bot_state.running = True

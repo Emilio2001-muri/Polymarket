@@ -368,11 +368,15 @@ with st.sidebar:
     if not paper:
         # Live mode requested — try to connect CLOB if not already
         if bot.clob is None:
-            bot.init_clob()
+            try:
+                bot.init_clob()
+            except Exception as exc:
+                bot.clob_error = str(exc)
         if bot.clob is not None:
             st.success("🔴 LIVE MODE — real orders enabled")
         else:
-            st.warning(f"⚠️ CLOB connecting… {bot.clob_error[:60]}")
+            err_msg = getattr(bot, "clob_error", "") or "connecting…"
+            st.warning(f"⚠️ CLOB connecting… {err_msg[:60]}")
             st.caption("Bot will retry each cycle. Orders queue until connected.")
 
     config.ORDER_SIZE_USDC = st.slider("💰 Order Size ($)", 1.0, 50.0, config.ORDER_SIZE_USDC, 1.0)
