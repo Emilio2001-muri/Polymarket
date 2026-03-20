@@ -367,6 +367,9 @@ class PolyBot:
             if not config.PAPER_TRADING and self.clob is None:
                 _bot_state.paper_mode = True
                 add_log("⚠️ Forced paper mode — no CLOB connection", "WARNING")
+            mode_label = "PAPER 📝" if _bot_state.paper_mode else "LIVE 🔴"
+            source = "cloud detected" if config._is_cloud() else "local machine"
+            add_log(f"🚀 Mode: {mode_label} ({source})")
             _bot_state.uptime_start = datetime.now(timezone.utc).isoformat()
 
         # Fetch real balance on init
@@ -841,7 +844,7 @@ class PolyBot:
                 detail = getattr(exc, "error_msg", "")
                 if status == 403:
                     add_log(
-                        "❌ Geo-blocked (403) — deploy on a non-US server (Render Frankfurt) for live trading.",
+                        "❌ Geo-blocked (403) — Polymarket blocks cloud IPs. Run the bot locally (INICIAR_BOT.bat).",
                         "ERROR",
                     )
                 else:

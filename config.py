@@ -88,9 +88,21 @@ PRICE_RANGE_MIN = 0.08          # skip markets below 8%
 PRICE_RANGE_MAX = 0.92          # skip markets above 92%
 
 # ---------------------------------------------------------------------------
-# Mode
+# Mode — auto-detect: LIVE when running locally, PAPER on cloud
 # ---------------------------------------------------------------------------
-PAPER_TRADING = True  # True = paper-trade, False = live orders
+def _is_cloud() -> bool:
+    """Detect if running on a cloud platform (Streamlit Cloud, Render, etc.)"""
+    cloud_markers = [
+        "STREAMLIT_SHARING",    # Streamlit Cloud
+        "RENDER",              # Render
+        "RENDER_EXTERNAL_URL", # Render
+        "DYNO",                # Heroku
+        "RAILWAY_ENVIRONMENT", # Railway
+        "FLY_APP_NAME",        # Fly.io
+    ]
+    return any(os.getenv(var) for var in cloud_markers)
+
+PAPER_TRADING = _is_cloud()  # LIVE on local machine, PAPER on cloud
 
 # ---------------------------------------------------------------------------
 # Paths
