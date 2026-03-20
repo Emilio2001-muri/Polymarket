@@ -33,6 +33,8 @@ CHAIN_ID = 137  # Polygon mainnet
 CLAUDE_MODEL = "claude-sonnet-4-20250514"
 CLAUDE_CONFIDENCE_MIN = 0.70    # minimum confidence to accept trade
 MISPRICING_MIN = 0.04           # minimum 4 cent mispricing to trade
+CLAUDE_COOLDOWN_MARKET = 300    # seconds between Claude calls for SAME market (5 min)
+CLAUDE_PRICE_CHANGE_TRIGGER = 0.03  # re-analyze if price moved >3% since last analysis
 
 # ---------------------------------------------------------------------------
 # Strategy — Momentum (Secondary Confirmation)
@@ -49,7 +51,7 @@ MACD_SIGNAL = 6
 # ---------------------------------------------------------------------------
 # Trading Parameters
 # ---------------------------------------------------------------------------
-MAX_CONCURRENT_MARKETS = 15
+MAX_CONCURRENT_MARKETS = 8       # fewer markets = fewer Claude API calls
 ORDER_SIZE_USDC = 5.0           # base order size in USD
 MAX_POSITION_PER_MARKET = 25.0  # max exposure per market
 TOTAL_MAX_EXPOSURE = 200.0      # total portfolio max
@@ -74,7 +76,7 @@ LIQ_REFRESH_SECONDS = 120
 # ---------------------------------------------------------------------------
 # Intervals & Limits
 # ---------------------------------------------------------------------------
-SCAN_INTERVAL_SECONDS = 30
+SCAN_INTERVAL_SECONDS = 60      # 60s between cycles to save Claude costs
 DATA_POINTS_MIN = 3             # minimum prices before analysis
 
 # ---------------------------------------------------------------------------

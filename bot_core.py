@@ -645,12 +645,42 @@ class PolyBot:
 
     # ── analysis pipeline (Claude-First) ──────────────────────────────────────
 
+    def _should_call_claude(self, cid: str, ms: dict) -> bool:
+        """Pre-filter: decide if this market warrants a Claude API call.
+        Returns False to SKIP Claude (saves money)."""
+        # Never re-analyze within cooldown period
+        last_ts = ms.get("claude_last_ts", "")
+        if last_ts:
+            try:
+                elapsed = (datetime.now(timezone.utc) - datetime.fromisoformat(last_ts)).total_seconds()
+                if elapsed < config.CLAUDE_COOLDOWN_MARKET:
+                    # Exception: re-analyze if price moved significantly
+                    last_price = ms.get("claude_last_price", 0)
+                    if last_price > 0:
+                        change = abs(ms["current_price"] - last_price) / last_price
+                        if change < config.CLAUDE_PRICE_CHANGE_TRIGGER:
+                            return False  # skip — nothing changed
+                    else:
+                        return False
+            except Exception:
+                pass
+
+        # Pre-filter: require at least ONE reason to analyze
+        mom_dir, _ = self.signal_engine.momentum_signal(ms)
+        has_momentum = mom_dir != "NEUTRAL"
+        has_volume_spike = ms.get("volume_24h", 0) > 5000
+        price_near_half = 0.25 <= ms["current_price"] <= 0.75
+        has_price_move = abs(ms.get("change_1d", 0)) > 0.02
+
+        # Need at least one trigger to justify spending on Claude
+        return has_momentum or has_volume_spike or price_near_half or has_price_move
+
     async def analyze_market(self, cid: str) -> Optional[dict]:
         ms = _bot_state.markets.get(cid)
         if not ms:
             return None
 
-        # Cooldown check
+        # Cooldown check (trade cooldown)
         if self.is_on_cooldown(cid):
             return None
 
@@ -670,8 +700,12 @@ class PolyBot:
         macd_dir, macd_str = self.signal_engine.macd_signal(prices)
         ms["macd_value"] = macd_str
 
-        # 3) Claude AI — PRIMARY STRATEGY
+        # 3) Claude AI — PRIMARY STRATEGY (with pre-filter to save $$$)
         if self.claude:
+            if not self._should_call_claude(cid, ms):
+                ms["last_signal"] = ms.get("last_signal", "WAIT (filtered)")
+                return None
+
             trade_signal, action, confidence, est_prob, analysis = self.claude.analyze_market(
                 market_question=ms["question"],
                 description=ms.get("description", ""),
@@ -684,6 +718,10 @@ class PolyBot:
                 change_1w=ms.get("change_1w", 0),
                 spread=ms.get("spread", 0),
             )
+            # Record when we last called Claude for this market
+            ms["claude_last_ts"] = datetime.now(timezone.utc).isoformat()
+            ms["claude_last_price"] = ms["current_price"]
+
             add_log(f"🤖 Claude → {ms['question'][:35]}… {analysis[:80]}")
 
             if not trade_signal:
@@ -695,7 +733,6 @@ class PolyBot:
                 expected_dir = "BUY" if action == "BUY_YES" else "SELL"
                 if mom_dir == expected_dir:
                     add_log(f"📈 Momentum confirms {action}")
-                # Don't block on momentum disagreement — Claude is primary
 
             ms["last_signal"] = f"{action} ✅ (conf {confidence:.0%})"
             return {
@@ -711,7 +748,6 @@ class PolyBot:
             if mom_dir == "NEUTRAL" and macd_dir == "NEUTRAL":
                 ms["last_signal"] = "NEUTRAL"
                 return None
-            # Prefer non-neutral signal
             direction = mom_dir if mom_dir != "NEUTRAL" else macd_dir
             if direction == "NEUTRAL":
                 ms["last_signal"] = "NEUTRAL"
@@ -805,11 +841,15 @@ class PolyBot:
                 detail = getattr(exc, "error_msg", "")
                 if status == 403:
                     add_log(
-                        f"❌ Order BLOCKED (403): {detail} — "
-                        "Polymarket blocks trading from US-based servers. "
-                        "Run the bot locally or on a non-US server for live trading.",
+                        "❌ Geo-blocked (403) — switching to PAPER mode. "
+                        "Live trading requires running locally (not US cloud servers).",
                         "ERROR",
                     )
+                    # Auto-switch to paper mode to stop wasting Claude calls on blocked orders
+                    with _state_lock:
+                        config.PAPER_TRADING = True
+                        _bot_state.paper_mode = True
+                    return  # don't record as successful trade
                 else:
                     add_log(f"❌ Execution error (status={status}): {detail or exc}", "ERROR")
 
