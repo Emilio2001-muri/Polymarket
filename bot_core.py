@@ -316,7 +316,7 @@ class PolyBot:
                 host=config.CLOB_HOST,
                 key=pk,
                 chain_id=config.CHAIN_ID,
-                signature_type=0,
+                signature_type=1,       # POLY_PROXY (Polymarket browser wallets)
                 funder=funder or None,
             )
             creds = client.derive_api_key()
@@ -362,7 +362,13 @@ class PolyBot:
         """Read real wallet balance from CLOB or set paper default."""
         if self.clob and not _bot_state.paper_mode:
             try:
-                bal_resp = self.clob.get_balance_allowance()
+                from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
+
+                params = BalanceAllowanceParams(
+                    asset_type=AssetType.COLLATERAL,
+                    signature_type=1,   # must match ClobClient signature_type
+                )
+                bal_resp = self.clob.get_balance_allowance(params)
                 if isinstance(bal_resp, dict):
                     real_bal = float(bal_resp.get("balance", 0)) / 1e6  # USDC 6 decimals
                 else:
@@ -375,22 +381,6 @@ class PolyBot:
                 add_log(f"💰 Real balance: ${_bot_state.real_balance:.2f}", "INFO")
             except Exception as exc:
                 add_log(f"⚠️ Balance fetch failed: {exc}", "WARNING")
-                # Fallback: try Gamma API for allowance
-                try:
-                    resp = _http_session.get(
-                        f"{config.CLOB_HOST}/balance",
-                        params={"address": config.FUNDER_ADDRESS},
-                        timeout=10,
-                    )
-                    if resp.status_code == 200:
-                        data = resp.json()
-                        bal = float(data.get("balance", 0)) / 1e6
-                        with _state_lock:
-                            _bot_state.real_balance = round(bal, 2)
-                            _bot_state.balance = _bot_state.real_balance
-                        add_log(f"💰 Balance via API: ${bal:.2f}", "INFO")
-                except Exception:
-                    pass
         else:
             with _state_lock:
                 if _bot_state.balance == 0:

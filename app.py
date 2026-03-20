@@ -343,11 +343,6 @@ with st.sidebar:
     if "bot" not in st.session_state:
         st.session_state.bot = get_bot()
         load_state()
-        # Ensure paper balance is set on first load
-        s = get_state()
-        if s.balance == 0 and s.paper_mode:
-            s.balance = 1000.0
-            s.initial_balance = 1000.0
 
     bot = st.session_state.bot
     state = get_state()
@@ -384,7 +379,9 @@ with st.sidebar:
             except Exception as exc:
                 bot.clob_error = str(exc)
         if bot.clob is not None:
-            st.success("🔴 LIVE MODE — real orders enabled")
+            # Sync real balance immediately when CLOB is connected
+            bot.sync_balance()
+            st.success(f"🔴 LIVE MODE — ${state.balance:,.2f} USDC")
         else:
             err_msg = getattr(bot, "clob_error", "") or "connecting…"
             st.warning(f"⚠️ CLOB connecting… {err_msg[:60]}")
