@@ -57,6 +57,14 @@ TOTAL_MAX_EXPOSURE = 500.0      # total portfolio max
 SLIPPAGE_TOLERANCE = 0.02
 
 # ---------------------------------------------------------------------------
+# Risk Management
+# ---------------------------------------------------------------------------
+MAX_EXPOSURE_PCT = 0.05         # max 5% of balance per trade
+TRAILING_STOP_PCT = 0.08        # 8% trailing stop
+TAKE_PROFIT_PCT = 0.15          # 15% take-profit
+COOLDOWN_SECONDS = 300          # 5 min cooldown per market after trade
+
+# ---------------------------------------------------------------------------
 # Liquidity Farming
 # ---------------------------------------------------------------------------
 LIQ_ENABLED = True

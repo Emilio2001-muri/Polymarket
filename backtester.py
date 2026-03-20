@@ -21,7 +21,7 @@ from typing import Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
-import pandas_ta as ta
+
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
@@ -92,15 +92,13 @@ def macd_signal(prices: List[float]) -> Tuple[str, float]:
     if len(prices) < needed:
         return "NEUTRAL", 0.0
 
-    df = pd.DataFrame({"close": prices})
-    macd_df = df.ta.macd(fast=config.MACD_FAST, slow=config.MACD_SLOW, signal=config.MACD_SIGNAL)
-    if macd_df is None or macd_df.empty:
-        return "NEUTRAL", 0.0
+    s = pd.Series(prices)
+    ema_fast = s.ewm(span=config.MACD_FAST, adjust=False).mean()
+    ema_slow = s.ewm(span=config.MACD_SLOW, adjust=False).mean()
+    macd_line = ema_fast - ema_slow
+    signal_line = macd_line.ewm(span=config.MACD_SIGNAL, adjust=False).mean()
+    hist = (macd_line - signal_line).dropna()
 
-    hist_col = [c for c in macd_df.columns if "MACDh" in c or "Hist" in c]
-    if not hist_col:
-        hist_col = [macd_df.columns[1]]
-    hist = macd_df[hist_col[0]].dropna()
     if len(hist) < 2:
         return "NEUTRAL", 0.0
 

@@ -343,6 +343,11 @@ with st.sidebar:
     if "bot" not in st.session_state:
         st.session_state.bot = get_bot()
         load_state()
+        # Ensure paper balance is set on first load
+        s = get_state()
+        if s.balance == 0 and s.paper_mode:
+            s.balance = 1000.0
+            s.initial_balance = 1000.0
 
     bot = st.session_state.bot
     state = get_state()
@@ -365,7 +370,13 @@ with st.sidebar:
     config.PAPER_TRADING = paper
     state.paper_mode = paper
 
-    if not paper:
+    if paper:
+        # Ensure paper balance shows $1,000
+        if state.balance == 0:
+            state.balance = 1000.0
+            state.initial_balance = 1000.0
+        st.info(f"📝 Paper mode — ${state.balance:,.2f}")
+    else:
         # Live mode requested — try to connect CLOB if not already
         if bot.clob is None:
             try:

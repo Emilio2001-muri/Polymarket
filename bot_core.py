@@ -305,7 +305,13 @@ class PolyBot:
 
         try:
             from py_clob_client.client import ClobClient
+        except ImportError:
+            self.clob = None
+            self.clob_error = "py_clob_client not installed"
+            add_log(f"⚠️ CLOB skip: {self.clob_error}", "WARNING")
+            return
 
+        try:
             client = ClobClient(
                 host=config.CLOB_HOST,
                 key=pk,
