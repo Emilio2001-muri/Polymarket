@@ -349,21 +349,26 @@ with st.sidebar:
 
     col_start, col_stop = st.columns(2)
     with col_start:
-        if st.button("▶ Start", use_container_width=True, type="primary"):
+        if st.button("▶ Start", width="stretch", type="primary"):
             if not bot.running:
                 bot.start()
                 st.toast("Bot started!", icon="🚀")
     with col_stop:
-        if st.button("⏹ Stop", use_container_width=True):
+        if st.button("⏹ Stop", width="stretch"):
             if bot.running:
                 bot.stop()
                 st.toast("Bot stopped", icon="🛑")
 
     st.divider()
 
-    paper = st.toggle("📝 Paper Trading", value=config.PAPER_TRADING)
+    paper = st.toggle("📝 Paper Trading", value=config.PAPER_TRADING, key="paper_toggle")
     config.PAPER_TRADING = paper
-    state.paper_mode = paper or (bot.clob is None)
+    state.paper_mode = paper
+    if not paper and bot.clob is None:
+        state.paper_mode = True
+        st.warning("⚠️ No CLOB connection — forced paper")
+    elif not paper:
+        st.success("🔴 LIVE MODE — real orders enabled")
 
     config.ORDER_SIZE_USDC = st.slider("💰 Order Size ($)", 1.0, 50.0, config.ORDER_SIZE_USDC, 1.0)
     config.MAX_CONCURRENT_MARKETS = st.slider("📊 Max Markets", 5, 30, config.MAX_CONCURRENT_MARKETS)
@@ -409,10 +414,12 @@ st.markdown(
 # ║  METRICS ROW                                                            ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
 
-c1, c2, c3, c4 = st.columns(4)
+c1, c2, c3, c4, c5 = st.columns(5)
 
 with c1:
-    st.markdown(metric_card("Balance", f"${state.balance:,.2f}"), unsafe_allow_html=True)
+    bal_cls = pnl_class(state.balance - state.initial_balance) if state.initial_balance > 0 else ""
+    bal_label = "Balance (LIVE)" if not state.paper_mode else "Balance (PAPER)"
+    st.markdown(metric_card(bal_label, f"${state.balance:,.2f}", bal_cls), unsafe_allow_html=True)
 with c2:
     pnl_val = state.total_pnl
     sign = "+" if pnl_val >= 0 else ""
@@ -424,7 +431,10 @@ with c3:
     wr = (state.winning_trades / state.total_trades * 100) if state.total_trades > 0 else 0
     st.markdown(metric_card("Win Rate", f"{wr:.1f}%", "positive" if wr > 50 else ""), unsafe_allow_html=True)
 with c4:
-    st.markdown(metric_card("Active Markets", str(len(state.markets))), unsafe_allow_html=True)
+    total_exp = sum(m.get("position_size", 0) for m in state.markets.values())
+    st.markdown(metric_card("Exposure", f"${total_exp:,.2f}"), unsafe_allow_html=True)
+with c5:
+    st.markdown(metric_card("Markets", str(len(state.markets))), unsafe_allow_html=True)
 
 st.markdown("<div style='height:1rem'></div>", unsafe_allow_html=True)
 
@@ -453,8 +463,8 @@ if state.pnl_history:
         )
     )
     fig_pnl.add_hline(y=0, line_dash="dot", line_color="rgba(255,255,255,0.2)" if is_dark else "rgba(0,0,0,0.15)")
-    fig_pnl.update_layout(**plotly_layout("Cumulative P&L", is_dark), height=300)
-    st.plotly_chart(fig_pnl, use_container_width=True)
+    fig_pnl.update_layout(**plotly_layout("Cumulative P&L", is_dark), height=380)
+    st.plotly_chart(fig_pnl, width="stretch")
 else:
     st.info("P&L chart will appear once the bot executes trades.")
 
@@ -475,7 +485,7 @@ with tab_trades:
         trades_df = pd.DataFrame(state.trades)
         trades_df = trades_df.sort_values("timestamp", ascending=False).head(100)
 
-        display_cols = ["timestamp", "market", "side", "price", "size", "confidence", "source"]
+        display_cols = ["timestamp", "market", "side", "price", "size", "confidence", "mode", "source"]
         available_cols = [c for c in display_cols if c in trades_df.columns]
         trades_df = trades_df[available_cols]
 
@@ -489,7 +499,7 @@ with tab_trades:
         if "timestamp" in trades_df.columns:
             trades_df["timestamp"] = pd.to_datetime(trades_df["timestamp"]).dt.strftime("%m/%d %H:%M:%S")
 
-        st.dataframe(trades_df, use_container_width=True, hide_index=True, height=400)
+        st.dataframe(trades_df, width="stretch", hide_index=True, height=400)
         st.caption(f"Showing last {len(trades_df)} of {state.total_trades} total trades")
     else:
         st.info("No trades yet. Start the bot and wait for signals.")
@@ -540,38 +550,36 @@ with tab_charts:
                     annotation_text=f"Entry {ms['entry_price']:.4f}", row=1, col=1,
                 )
 
-            # MACD subplot
+            # MACD subplot (manual EWM — no pandas_ta)
             if len(prices) >= config.MACD_SLOW + config.MACD_SIGNAL:
-                df_m = pd.DataFrame({"close": prices})
-                macd_df = df_m.ta.macd(
-                    fast=config.MACD_FAST, slow=config.MACD_SLOW, signal=config.MACD_SIGNAL
+                s = pd.Series(prices)
+                ema_fast = s.ewm(span=config.MACD_FAST, adjust=False).mean()
+                ema_slow = s.ewm(span=config.MACD_SLOW, adjust=False).mean()
+                macd_line = ema_fast - ema_slow
+                signal_line = macd_line.ewm(span=config.MACD_SIGNAL, adjust=False).mean()
+                hist_vals = macd_line - signal_line
+
+                macd_ts = ts_dt[-len(macd_line):]
+
+                fig.add_trace(
+                    go.Scatter(x=macd_ts, y=macd_line, name="MACD",
+                               line=dict(color="#a855f7", width=1.5)),
+                    row=2, col=1,
                 )
-                if macd_df is not None and not macd_df.empty:
-                    macd_ts = ts_dt[-len(macd_df):]
-
-                    macd_col = macd_df.columns[0]
-                    sig_col = macd_df.columns[2]
-                    hist_col = macd_df.columns[1]
-
-                    fig.add_trace(
-                        go.Scatter(x=macd_ts, y=macd_df[macd_col], name="MACD",
-                                   line=dict(color="#a855f7", width=1.5)),
-                        row=2, col=1,
-                    )
-                    fig.add_trace(
-                        go.Scatter(x=macd_ts, y=macd_df[sig_col], name="Signal",
-                                   line=dict(color="#ec4899", width=1.5)),
-                        row=2, col=1,
-                    )
-                    colors = ["#22ff88" if v >= 0 else "#ff3366" for v in macd_df[hist_col].fillna(0)]
-                    fig.add_trace(
-                        go.Bar(x=macd_ts, y=macd_df[hist_col], name="Histogram",
-                               marker_color=colors, opacity=0.6),
-                        row=2, col=1,
+                fig.add_trace(
+                    go.Scatter(x=macd_ts, y=signal_line, name="Signal",
+                               line=dict(color="#ec4899", width=1.5)),
+                    row=2, col=1,
+                )
+                colors = ["#22ff88" if v >= 0 else "#ff3366" for v in hist_vals.fillna(0)]
+                fig.add_trace(
+                    go.Bar(x=macd_ts, y=hist_vals, name="Histogram",
+                           marker_color=colors, opacity=0.6),
+                    row=2, col=1,
                     )
 
             fig.update_layout(**plotly_layout("", is_dark), height=520, showlegend=True)
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
 
             # Position info
             info_cols = st.columns(5)
@@ -597,7 +605,7 @@ with tab_charts:
                     "Signal": m.get("last_signal", "—"),
                     "Points": len(m.get("prices", [])),
                 })
-            st.dataframe(pd.DataFrame(overview), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(overview), width="stretch", hide_index=True)
     else:
         st.info("No markets tracked yet. Start the bot to begin scanning.")
 
@@ -605,6 +613,7 @@ with tab_charts:
 # ── TAB 3: Claude Analysis ──────────────────────────────────────────────────
 
 with tab_claude:
+    st.markdown("### 🧠 Claude AI Signal Confirmations")
     if state.claude_analyses:
         analyses = list(reversed(state.claude_analyses[-50:]))
 
@@ -612,16 +621,21 @@ with tab_claude:
             conf = a.get("confidence", 0)
             color = "#22ff88" if conf >= 0.7 else "#ff9800" if conf >= 0.5 else "#ff3366"
             icon = "✅" if conf >= config.CLAUDE_CONFIDENCE_MIN else "❌"
+            action = a.get('action', 'HOLD')
+            market = a.get('market', '')
+            reasoning = a.get('reasoning', '')
+            signal_in = a.get('signal_in', '—')
+            ts = a.get('timestamp', '')[:19]
 
             with st.container():
                 st.markdown(
-                    f"**{icon} {a.get('action', 'HOLD')}** — "
-                    f"<span style='color:{color}'>{conf:.0%}</span> · "
-                    f"_{a.get('market', '')}_ · "
-                    f"<small>{a.get('timestamp', '')[:19]}</small>",
+                    f"### {icon} {action} — "
+                    f"<span style='color:{color};font-size:1.3rem;font-weight:700'>{conf:.0%}</span>",
                     unsafe_allow_html=True,
                 )
-                st.caption(f"Signal in: {a.get('signal_in', '—')} · {a.get('reasoning', '')}")
+                st.markdown(f"**Market:** {market}")
+                st.markdown(f"**Input signal:** {signal_in} → **Claude says:** {reasoning}")
+                st.caption(f"{ts}")
                 st.divider()
 
         st.caption(f"Showing last {len(analyses)} analyses")
@@ -636,7 +650,7 @@ with tab_logs:
         log_df = pd.DataFrame(list(reversed(state.logs[-200:])))
         log_df.columns = ["Timestamp", "Level", "Message"]
         log_df["Timestamp"] = pd.to_datetime(log_df["Timestamp"]).dt.strftime("%m/%d %H:%M:%S")
-        st.dataframe(log_df, use_container_width=True, hide_index=True, height=500)
+        st.dataframe(log_df, width="stretch", hide_index=True, height=500)
     else:
         st.info("Logs will appear when the bot starts.")
 
