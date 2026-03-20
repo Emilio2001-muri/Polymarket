@@ -61,8 +61,9 @@ logger = logging.getLogger("polybot")
 class BotState:
     running: bool = False
     paper_mode: bool = True
-    balance: float = 1000.0
-    initial_balance: float = 1000.0
+    balance: float = 0.0
+    initial_balance: float = 0.0
+    real_balance: float = 0.0          # live wallet balance
     total_pnl: float = 0.0
     total_trades: int = 0
     winning_trades: int = 0
@@ -73,6 +74,7 @@ class BotState:
     claude_analyses: list = field(default_factory=list)
     last_scan: str = ""
     uptime_start: str = ""
+    cooldowns: dict = field(default_factory=dict)  # cid -> iso timestamp
 
 
 _state_lock = threading.Lock()
@@ -299,16 +301,64 @@ class PolyBot:
             )
             creds = self.clob.derive_api_key()
             self.clob.set_api_creds(creds)
-            add_log("✅ CLOB client connected")
+            add_log("✅ CLOB client connected — LIVE mode available")
         except Exception as exc:
             add_log(f"⚠️ CLOB init failed ({exc}). Paper‑mode only.", "WARNING")
             self.clob = None
 
         with _state_lock:
             _bot_state.running = True
-            _bot_state.paper_mode = config.PAPER_TRADING or (self.clob is None)
+            _bot_state.paper_mode = config.PAPER_TRADING
+            if not config.PAPER_TRADING and self.clob is None:
+                _bot_state.paper_mode = True
+                add_log("⚠️ Forced paper mode — no CLOB connection", "WARNING")
             _bot_state.uptime_start = datetime.now(timezone.utc).isoformat()
+
+        # Fetch real balance on init
+        self.sync_balance()
         return True
+
+    # ── balance sync ────────────────────────────────────────────────────────
+
+    def sync_balance(self):
+        """Read real wallet balance from CLOB or set paper default."""
+        if self.clob and not _bot_state.paper_mode:
+            try:
+                bal_resp = self.clob.get_balance_allowance()
+                if isinstance(bal_resp, dict):
+                    real_bal = float(bal_resp.get("balance", 0)) / 1e6  # USDC 6 decimals
+                else:
+                    real_bal = float(getattr(bal_resp, "balance", 0)) / 1e6
+                with _state_lock:
+                    _bot_state.real_balance = round(real_bal, 2)
+                    _bot_state.balance = _bot_state.real_balance
+                    if _bot_state.initial_balance == 0:
+                        _bot_state.initial_balance = _bot_state.real_balance
+                add_log(f"💰 Real balance: ${_bot_state.real_balance:.2f}", "INFO")
+            except Exception as exc:
+                add_log(f"⚠️ Balance fetch failed: {exc}", "WARNING")
+                # Fallback: try Gamma API for allowance
+                try:
+                    resp = _http_session.get(
+                        f"{config.CLOB_HOST}/balance",
+                        params={"address": config.FUNDER_ADDRESS},
+                        timeout=10,
+                    )
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        bal = float(data.get("balance", 0)) / 1e6
+                        with _state_lock:
+                            _bot_state.real_balance = round(bal, 2)
+                            _bot_state.balance = _bot_state.real_balance
+                        add_log(f"💰 Balance via API: ${bal:.2f}", "INFO")
+                except Exception:
+                    pass
+        else:
+            with _state_lock:
+                if _bot_state.balance == 0:
+                    _bot_state.balance = 1000.0
+                    _bot_state.initial_balance = 1000.0
+                add_log(f"📝 Paper balance: ${_bot_state.balance:.2f}", "INFO")
 
     # ── market discovery (Gamma API) ────────────────────────────────────────
 
@@ -351,15 +401,14 @@ class PolyBot:
 
     async def fetch_trades(self, token_id: str) -> List[dict]:
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    f"{config.CLOB_HOST}/trades",
-                    params={"token_id": token_id, "limit": 100},
-                    timeout=aiohttp.ClientTimeout(total=10),
-                ) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        return data if isinstance(data, list) else data.get("data", [])
+            resp = _http_session.get(
+                f"{config.CLOB_HOST}/trades",
+                params={"token_id": token_id, "limit": 100},
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                return data if isinstance(data, list) else data.get("data", [])
         except Exception:
             pass
         return []
@@ -411,6 +460,9 @@ class PolyBot:
                     "last_signal": "",
                     "macd_value": 0.0,
                     "cvd_value": 0.0,
+                    "peak_price": 0.0,
+                    "trailing_stop": 0.0,
+                    "take_profit": 0.0,
                 }
 
             ms = _bot_state.markets[cid]
@@ -422,11 +474,91 @@ class PolyBot:
                 ms["prices"] = ms["prices"][-300:]
                 ms["timestamps"] = ms["timestamps"][-300:]
 
+    # ── cooldown check ───────────────────────────────────────────────────────
+
+    def is_on_cooldown(self, cid: str) -> bool:
+        cd = _bot_state.cooldowns.get(cid)
+        if not cd:
+            return False
+        try:
+            cd_time = datetime.fromisoformat(cd)
+            elapsed = (datetime.now(timezone.utc) - cd_time).total_seconds()
+            return elapsed < config.COOLDOWN_SECONDS
+        except Exception:
+            return False
+
+    def set_cooldown(self, cid: str):
+        _bot_state.cooldowns[cid] = datetime.now(timezone.utc).isoformat()
+
+    # ── trailing stop / take-profit check ───────────────────────────────────
+
+    async def check_exit_conditions(self, cid: str):
+        ms = _bot_state.markets.get(cid)
+        if not ms or ms["position_size"] <= 0:
+            return
+
+        price = ms["current_price"]
+        entry = ms["entry_price"]
+        side = ms["position_side"]
+
+        # Calculate current return
+        if side == "YES":
+            ret = (price - entry) / entry if entry > 0 else 0
+            # Update peak
+            if price > ms.get("peak_price", 0):
+                ms["peak_price"] = price
+            trailing_ref = ms["peak_price"]
+            trail_hit = (trailing_ref - price) / trailing_ref >= config.TRAILING_STOP_PCT if trailing_ref > 0 else False
+        else:
+            ret = (entry - price) / entry if entry > 0 else 0
+            if price < ms.get("peak_price", 999) or ms.get("peak_price", 0) == 0:
+                ms["peak_price"] = price
+            trailing_ref = ms["peak_price"]
+            trail_hit = (price - trailing_ref) / trailing_ref >= config.TRAILING_STOP_PCT if trailing_ref > 0 else False
+
+        tp_hit = ret >= config.TAKE_PROFIT_PCT
+
+        if trail_hit or tp_hit:
+            reason = "TRAILING STOP" if trail_hit else "TAKE PROFIT"
+            pnl = ret * ms["position_size"]
+            add_log(f"🔔 {reason} | {ms['question'][:35]} | PnL ${pnl:.2f}", "INFO")
+
+            # Close position
+            with _state_lock:
+                _bot_state.trades.append({
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "market": ms["question"][:60],
+                    "side": f"CLOSE ({reason})",
+                    "price": price,
+                    "size": ms["position_size"],
+                    "pnl": round(pnl, 4),
+                    "source": reason,
+                    "confidence": 1.0,
+                })
+                _bot_state.total_trades += 1
+                if pnl > 0:
+                    _bot_state.winning_trades += 1
+                ms["position_side"] = ""
+                ms["position_size"] = 0.0
+                ms["entry_price"] = 0.0
+                ms["peak_price"] = 0.0
+                ms["unrealized_pnl"] = 0.0
+            self.set_cooldown(cid)
+            save_state()
+
     # ── analysis pipeline ───────────────────────────────────────────────────
 
     async def analyze_market(self, cid: str) -> Optional[dict]:
         ms = _bot_state.markets.get(cid)
         if not ms:
+            return None
+
+        # Cooldown check
+        if self.is_on_cooldown(cid):
+            return None
+
+        # Skip if already have a position (wait for exit)
+        if ms["position_size"] > 0:
             return None
 
         prices = ms["prices"]
@@ -496,8 +628,14 @@ class PolyBot:
         if not ms:
             return
 
-        size = config.ORDER_SIZE_USDC
         price = ms["current_price"]
+
+        # Dynamic size: min of configured size OR 5% of balance
+        max_risk = _bot_state.balance * config.MAX_EXPOSURE_PCT
+        size = min(config.ORDER_SIZE_USDC, max_risk)
+        if size < 0.5:
+            add_log("⚠️ Order too small — balance too low", "WARNING")
+            return
 
         # Exposure guards
         total_exp = sum(m["position_size"] for m in _bot_state.markets.values())
@@ -514,14 +652,15 @@ class PolyBot:
 
         if _bot_state.paper_mode:
             success = True
-            add_log(f"📝 PAPER {action} | {ms['question'][:40]} @ {price:.4f} × ${size}")
+            add_log(f"📝 PAPER {action} | {ms['question'][:40]} @ {price:.4f} × ${size:.2f}")
         else:
+            add_log(f"🔴 LIVE ORDER attempt: {action} | {ms['question'][:40]} @ {price:.4f} × ${size:.2f}", "INFO")
             try:
                 from py_clob_client.clob_types import OrderArgs
 
                 order_args = OrderArgs(
                     price=round(price, 2),
-                    size=size,
+                    size=round(size, 2),
                     side="BUY",
                     token_id=token_id,
                 )
@@ -529,7 +668,7 @@ class PolyBot:
                 resp = self.clob.post_order(signed)
                 if resp and (resp.get("success") or resp.get("orderID")):
                     success = True
-                    add_log(f"🎯 LIVE {action} | {ms['question'][:40]} @ {price:.4f} × ${size}")
+                    add_log(f"🎯 LIVE FILLED {action} | {ms['question'][:40]} @ {price:.4f} × ${size:.2f}", "INFO")
                 else:
                     add_log(f"❌ Order rejected: {resp}", "ERROR")
             except Exception as exc:
@@ -540,6 +679,7 @@ class PolyBot:
                 ms["position_side"] = "YES" if action == "BUY" else "NO"
                 ms["position_size"] += size
                 ms["entry_price"] = price
+                ms["peak_price"] = price  # init trailing stop reference
 
                 _bot_state.trades.append(
                     {
@@ -547,15 +687,17 @@ class PolyBot:
                         "market": ms["question"][:60],
                         "side": action,
                         "price": price,
-                        "size": size,
+                        "size": round(size, 2),
                         "pnl": 0.0,
                         "source": "MACD+CVD+Claude",
                         "confidence": sig["confidence"],
+                        "mode": "PAPER" if _bot_state.paper_mode else "LIVE",
                     }
                 )
                 _bot_state.total_trades += 1
                 if len(_bot_state.trades) > 1000:
                     _bot_state.trades = _bot_state.trades[-1000:]
+            self.set_cooldown(sig["cid"])
             save_state()
 
     # ── liquidity farming ───────────────────────────────────────────────────
@@ -627,6 +769,17 @@ class PolyBot:
 
     async def run_cycle(self):
         try:
+            # Sync paper_mode from config each cycle
+            with _state_lock:
+                _bot_state.paper_mode = config.PAPER_TRADING
+
+            # If live mode requested but no CLOB yet, retry connection
+            if not config.PAPER_TRADING and self.clob is None:
+                self.init_clob()
+
+            # 0  Sync balance
+            self.sync_balance()
+
             # 1  Discover
             raw = await self.fetch_markets()
             if raw:
@@ -635,7 +788,13 @@ class PolyBot:
 
             _bot_state.last_scan = datetime.now(timezone.utc).isoformat()
 
-            # 2  Analyse + Execute
+            # 2  Check exit conditions (trailing stop / TP)
+            for cid in list(_bot_state.markets.keys()):
+                if not self.running:
+                    break
+                await self.check_exit_conditions(cid)
+
+            # 3  Analyse + Execute
             for cid in list(_bot_state.markets.keys()):
                 if not self.running:
                     break
@@ -645,7 +804,7 @@ class PolyBot:
                 await self.refresh_liquidity(cid)
                 await asyncio.sleep(0.3)
 
-            # 3  P&L
+            # 4  P&L
             self.update_pnl()
             save_state()
 

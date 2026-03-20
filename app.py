@@ -364,11 +364,16 @@ with st.sidebar:
     paper = st.toggle("📝 Paper Trading", value=config.PAPER_TRADING, key="paper_toggle")
     config.PAPER_TRADING = paper
     state.paper_mode = paper
-    if not paper and bot.clob is None:
-        state.paper_mode = True
-        st.warning("⚠️ No CLOB connection — forced paper")
-    elif not paper:
-        st.success("🔴 LIVE MODE — real orders enabled")
+
+    if not paper:
+        # Live mode requested — try to connect CLOB if not already
+        if bot.clob is None:
+            bot.init_clob()
+        if bot.clob is not None:
+            st.success("🔴 LIVE MODE — real orders enabled")
+        else:
+            st.warning(f"⚠️ CLOB connecting… {bot.clob_error[:60]}")
+            st.caption("Bot will retry each cycle. Orders queue until connected.")
 
     config.ORDER_SIZE_USDC = st.slider("💰 Order Size ($)", 1.0, 50.0, config.ORDER_SIZE_USDC, 1.0)
     config.MAX_CONCURRENT_MARKETS = st.slider("📊 Max Markets", 5, 30, config.MAX_CONCURRENT_MARKETS)
