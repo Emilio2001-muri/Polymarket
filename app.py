@@ -600,10 +600,10 @@ with tab_charts:
 
             # Position info
             info_cols = st.columns(5)
-            info_cols[0].metric("Price", f"{ms['current_price']:.4f}")
+            info_cols[0].metric("Price", f"{ms['current_price']:.3f}")
             info_cols[1].metric("Position", f"{ms['position_side'] or '—'} ${ms['position_size']:.2f}")
             info_cols[2].metric("Unrealized", f"${ms.get('unrealized_pnl', 0):.4f}")
-            info_cols[3].metric("MACD Str", f"{ms.get('macd_value', 0):.3f}")
+            info_cols[3].metric("Vol 24h", f"${ms.get('volume_24h', 0):,.0f}")
             info_cols[4].metric("Signal", ms.get("last_signal", "—"))
 
         else:
@@ -615,12 +615,13 @@ with tab_charts:
             for cid, m in market_items:
                 overview.append({
                     "Market": m.get("question", "")[:50],
-                    "Price": f"{m.get('current_price', 0):.4f}",
+                    "Price": f"{m.get('current_price', 0):.3f}",
+                    "1dΔ": f"{m.get('change_1d', 0):+.3f}",
+                    "Vol24h": f"${m.get('volume_24h', 0):,.0f}",
                     "Position": m.get("position_side", "—"),
                     "Size": f"${m.get('position_size', 0):.2f}",
                     "P&L": f"${m.get('unrealized_pnl', 0):.4f}",
                     "Signal": m.get("last_signal", "—"),
-                    "Points": len(m.get("prices", [])),
                 })
             st.dataframe(pd.DataFrame(overview), width="stretch", hide_index=True)
     else:
@@ -630,7 +631,7 @@ with tab_charts:
 # ── TAB 3: Claude Analysis ──────────────────────────────────────────────────
 
 with tab_claude:
-    st.markdown("### 🧠 Claude AI Signal Confirmations")
+    st.markdown("### 🧠 Claude AI Market Analysis")
     if state.claude_analyses:
         analyses = list(reversed(state.claude_analyses[-50:]))
 
@@ -642,6 +643,8 @@ with tab_claude:
             market = a.get('market', '')
             reasoning = a.get('reasoning', '')
             signal_in = a.get('signal_in', '—')
+            est_prob = a.get('estimated_prob', 0)
+            mispricing = a.get('mispricing', 0)
             ts = a.get('timestamp', '')[:19]
 
             with st.container():
@@ -651,7 +654,9 @@ with tab_claude:
                     unsafe_allow_html=True,
                 )
                 st.markdown(f"**Market:** {market}")
-                st.markdown(f"**Input signal:** {signal_in} → **Claude says:** {reasoning}")
+                if est_prob:
+                    st.markdown(f"**Estimated probability:** {est_prob:.1%} | **Current price:** {signal_in} | **Mispricing:** {mispricing:+.1f}¢")
+                st.markdown(f"**Analysis:** {reasoning}")
                 st.caption(f"{ts}")
                 st.divider()
 

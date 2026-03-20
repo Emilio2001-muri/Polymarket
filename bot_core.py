@@ -1,14 +1,14 @@
 """
-PolyBot Core — Hybrid Quantitative Trading Engine for Polymarket
-=================================================================
-Edge stack:
-    1. MACD crossover  →  trend / momentum signal
-    2. CVD (Cumulative Volume Delta)  →  order‑flow confirmation
-    3. Liquidity farming  →  passive rewards from resting limit orders
-    4. Claude AI  →  final confirmation gate with contextual reasoning
+PolyBot Core — Claude-First Quantitative Trading Engine for Polymarket
+=======================================================================
+Strategy (inspired by the viral $68→$1.6M approach):
+    1. Claude AI  →  PRIMARY: analyzes market question + context to find
+       mispriced probabilities (the real edge on prediction markets)
+    2. Momentum   →  Gamma API 1h/1d/1w price changes for confirmation
+    3. MACD       →  Optional tertiary signal on accumulated price data
 
-Designed for 15‑20 simultaneous markets with async I/O and a
-thread‑safe state object consumed by the Streamlit dashboard.
+The key insight: prediction markets are about INFORMATION, not charts.
+Claude evaluates whether the current price reflects the true probability.
 """
 
 from __future__ import annotations
@@ -121,15 +121,31 @@ def add_log(message: str, level: str = "INFO"):
 
 
 # ╔═══════════════════════════════════════════════════════════════════════════╗
-# ║  SIGNAL ENGINE  —  MACD + CVD                                           ║
+# ║  SIGNAL ENGINE  —  Momentum + optional MACD                             ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
 
 class SignalEngine:
-    """Stateless helpers that take raw data and return (direction, strength)."""
+    """Stateless helpers that use Gamma API data and accumulated prices."""
+
+    @staticmethod
+    def momentum_signal(market: dict) -> Tuple[str, float]:
+        """Use Gamma API 1h/1d/1w price changes. Returns (direction, strength)."""
+        ch1h = float(market.get("change_1h", 0) or 0)
+        ch1d = float(market.get("change_1d", 0) or 0)
+        ch1w = float(market.get("change_1w", 0) or 0)
+
+        # Weighted momentum score
+        score = ch1h * 0.5 + ch1d * 0.3 + ch1w * 0.2
+
+        if abs(score) < 0.005:
+            return "NEUTRAL", abs(score)
+        if score > 0:
+            return "BUY", min(abs(score) * 5, 1.0)
+        return "SELL", min(abs(score) * 5, 1.0)
 
     @staticmethod
     def macd_signal(prices: List[float]) -> Tuple[str, float]:
-        """Return (BUY | SELL | NEUTRAL, strength 0‑1)."""
+        """Return (BUY | SELL | NEUTRAL, strength 0-1)."""
         needed = config.MACD_SLOW + config.MACD_SIGNAL + 1
         if len(prices) < needed:
             return "NEUTRAL", 0.0
@@ -147,7 +163,6 @@ class SignalEngine:
         cur = float(hist.iloc[-1])
         prev = float(hist.iloc[-2])
 
-        # Crossover detection
         if cur > 0 and prev <= 0:
             return "BUY", min(abs(cur) * 10, 1.0)
         if cur < 0 and prev >= 0:
@@ -158,28 +173,9 @@ class SignalEngine:
             return "SELL", min(abs(cur) * 5, 0.6)
         return "NEUTRAL", 0.0
 
-    @staticmethod
-    def cvd_signal(trades: List[dict]) -> Tuple[str, float]:
-        """Return (BUY | SELL | NEUTRAL, normalised CVD –1…1)."""
-        if len(trades) < 10:
-            return "NEUTRAL", 0.0
-
-        buy_vol = sum(float(t.get("size", 0)) for t in trades if str(t.get("side", "")).upper() == "BUY")
-        sell_vol = sum(float(t.get("size", 0)) for t in trades if str(t.get("side", "")).upper() == "SELL")
-        total = buy_vol + sell_vol
-        if total == 0:
-            return "NEUTRAL", 0.0
-
-        cvd = (buy_vol - sell_vol) / total
-        if cvd > config.CVD_THRESHOLD:
-            return "BUY", cvd
-        if cvd < -config.CVD_THRESHOLD:
-            return "SELL", abs(cvd)
-        return "NEUTRAL", abs(cvd)
-
 
 # ╔═══════════════════════════════════════════════════════════════════════════╗
-# ║  CLAUDE AI ADVISOR                                                      ║
+# ║  CLAUDE AI — PRIMARY STRATEGY ENGINE                                    ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
 
 class ClaudeAdvisor:
@@ -187,44 +183,59 @@ class ClaudeAdvisor:
         import anthropic
         self.client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
 
-    # ── public ──────────────────────────────────────────────────────────────
-    def confirm_signal(
+    def analyze_market(
         self,
         market_question: str,
+        description: str,
         current_price: float,
-        macd_signal: str,
-        macd_strength: float,
-        cvd_signal: str,
-        cvd_value: float,
-        recent_prices: List[float],
-    ) -> Tuple[bool, float, str]:
-        """Ask Claude to confirm a signal. Returns (confirmed, confidence, analysis)."""
-
+        end_date: str,
+        volume_24h: float,
+        liquidity: float,
+        change_1h: float,
+        change_1d: float,
+        change_1w: float,
+        spread: float,
+    ) -> Tuple[bool, str, float, float, str]:
+        """
+        PRIMARY strategy: Claude evaluates if a market is mispriced.
+        Returns (should_trade, action, confidence, estimated_prob, reasoning).
+        """
         prompt = (
-            "You are a quantitative trading analyst for Polymarket prediction markets.\n"
-            "Analyze this signal and respond with ONLY valid JSON — no markdown fences.\n\n"
+            "You are an expert quantitative trader on Polymarket prediction markets.\n"
+            "Your job: find MISPRICED markets where the current price doesn't reflect true probability.\n\n"
             f'Market: "{market_question}"\n'
-            f"Current YES price: {current_price:.4f}\n"
-            f"MACD signal: {macd_signal} (strength {macd_strength:.2f})\n"
-            f"CVD signal: {cvd_signal} (value {cvd_value:.2f})\n"
-            f"Recent prices (last 10): {recent_prices[-10:]}\n"
-            f'Trend: {"UP" if len(recent_prices) > 5 and recent_prices[-1] > recent_prices[-5] else "DOWN" if len(recent_prices) > 5 else "FLAT"}\n\n'
-            "Rules:\n"
-            "- Price is a probability 0‑1. BUY_YES = probability should rise. BUY_NO = should fall.\n"
-            "- Both MACD and CVD should broadly agree for high confidence.\n"
-            "- Avoid trades when price < 0.06 or > 0.94 (low remaining edge).\n\n"
-            'Respond ONLY with JSON: {"confirmed": bool, "confidence": 0.0-1.0, '
-            '"action": "BUY_YES"|"BUY_NO"|"HOLD", "reasoning": "one sentence"}'
+            f"Description: {description[:400]}\n"
+            f"Current YES price: {current_price:.3f} (= {current_price*100:.1f}% implied probability)\n"
+            f"End date: {end_date}\n"
+            f"24h volume: ${volume_24h:,.0f}\n"
+            f"Liquidity: ${liquidity:,.0f}\n"
+            f"Price changes: 1h={change_1h:+.3f}, 1d={change_1d:+.3f}, 1w={change_1w:+.3f}\n"
+            f"Spread: {spread}\n"
+            f"Today's date: {datetime.now(timezone.utc).strftime('%Y-%m-%d')}\n\n"
+            "ANALYSIS REQUIRED:\n"
+            "1. What is the TRUE probability this event happens? (your expert estimate)\n"
+            "2. Is the market mispriced? By how much?\n"
+            "3. Which side should we trade? BUY_YES if true prob > market price, BUY_NO if true prob < market price\n"
+            "4. How confident are you in this analysis?\n\n"
+            "RULES:\n"
+            "- Be conservative. Only recommend trades when you see clear mispricing of at least 4+ cents.\n"
+            "- Consider time until resolution, current events, and market context.\n"
+            "- High volume + large price changes suggest new information — analyze carefully.\n"
+            "- Markets near 0.50 have the most edge potential. Near 0/1 have less.\n"
+            "- NEVER trade if you are unsure — HOLD is always valid.\n\n"
+            'Respond with ONLY valid JSON (no markdown fences):\n'
+            '{"should_trade": bool, "action": "BUY_YES"|"BUY_NO"|"HOLD", '
+            '"confidence": 0.0-1.0, "estimated_probability": 0.0-1.0, '
+            '"mispricing": float_cents, "reasoning": "2-3 sentences"}'
         )
 
         try:
             resp = self.client.messages.create(
                 model=config.CLAUDE_MODEL,
-                max_tokens=300,
+                max_tokens=400,
                 messages=[{"role": "user", "content": prompt}],
             )
             text = resp.content[0].text.strip()
-            # Strip markdown fences if model added them
             if "```" in text:
                 text = text.split("```")[1]
                 if text.startswith("json"):
@@ -232,36 +243,42 @@ class ClaudeAdvisor:
                 text = text.strip()
 
             result = json.loads(text)
-            confirmed = bool(result.get("confirmed", False))
-            confidence = float(result.get("confidence", 0))
-            reasoning = result.get("reasoning", "")
+            should_trade = bool(result.get("should_trade", False))
             action = result.get("action", "HOLD")
+            confidence = float(result.get("confidence", 0))
+            est_prob = float(result.get("estimated_probability", current_price))
+            mispricing = float(result.get("mispricing", 0))
+            reasoning = result.get("reasoning", "")
 
-            analysis = f"[{action}] conf {confidence:.0%} — {reasoning}"
+            analysis = f"[{action}] conf {confidence:.0%} | est={est_prob:.1%} vs mkt={current_price:.1%} | {reasoning}"
 
             with _state_lock:
-                _bot_state.claude_analyses.append(
-                    {
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
-                        "market": market_question[:60],
-                        "signal_in": macd_signal,
-                        "action": action,
-                        "confidence": confidence,
-                        "reasoning": reasoning,
-                    }
-                )
+                _bot_state.claude_analyses.append({
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "market": market_question[:60],
+                    "signal_in": f"price={current_price:.3f}",
+                    "action": action,
+                    "confidence": confidence,
+                    "estimated_prob": est_prob,
+                    "mispricing": mispricing,
+                    "reasoning": reasoning,
+                })
                 if len(_bot_state.claude_analyses) > 200:
                     _bot_state.claude_analyses = _bot_state.claude_analyses[-200:]
 
-            return (
-                confirmed and confidence >= config.CLAUDE_CONFIDENCE_MIN,
-                confidence,
-                analysis,
+            # Trade if Claude is confident AND finds significant mispricing
+            trade_signal = (
+                should_trade
+                and confidence >= config.CLAUDE_CONFIDENCE_MIN
+                and abs(est_prob - current_price) >= config.MISPRICING_MIN
+                and action in ("BUY_YES", "BUY_NO")
             )
+
+            return trade_signal, action, confidence, est_prob, analysis
 
         except Exception as exc:
             logger.error("Claude API error: %s", exc)
-            return False, 0.0, f"Error: {exc}"
+            return False, "HOLD", 0.0, current_price, f"Error: {exc}"
 
 
 # ╔═══════════════════════════════════════════════════════════════════════════╗
@@ -391,92 +408,121 @@ class PolyBot:
     # ── market discovery (Gamma API) ────────────────────────────────────────
 
     async def fetch_markets(self) -> List[dict]:
+        """Fetch active markets from Gamma API with full metadata."""
         try:
             resp = _http_session.get(
                 f"{config.GAMMA_HOST}/markets",
-                params={"limit": 30, "active": "true", "closed": "false", "sortBy": "volume"},
+                params={
+                    "limit": 50,
+                    "active": "true",
+                    "closed": "false",
+                    "sortBy": "volume24hr",
+                },
                 timeout=20,
             )
             resp.raise_for_status()
             data = resp.json()
             markets = data if isinstance(data, list) else data.get("data", [])
-            add_log(f"✅ Fetch exitoso: {len(markets)} mercados cargados")
+            add_log(f"✅ Fetched {len(markets)} markets from Gamma API")
             return markets
         except Exception as exc:
             add_log(f"Market fetch error: {exc}", "ERROR")
             await asyncio.sleep(5)
             return []
 
-    # ── order‑book / trades --------------------------------------------------
+    # ── order-book (public, no auth) ────────────────────────────────────────
 
     async def fetch_order_book(self, token_id: str) -> dict:
-        if self.clob and not _bot_state.paper_mode:
-            try:
-                book = self.clob.get_order_book(token_id)
-                return {
-                    "bids": [
-                        {"price": float(o.price), "size": float(o.size)}
-                        for o in (book.bids or [])
-                    ],
-                    "asks": [
-                        {"price": float(o.price), "size": float(o.size)}
-                        for o in (book.asks or [])
-                    ],
-                }
-            except Exception:
-                pass
-        return {"bids": [], "asks": []}
-
-    async def fetch_trades(self, token_id: str) -> List[dict]:
         try:
             resp = _http_session.get(
-                f"{config.CLOB_HOST}/trades",
-                params={"token_id": token_id, "limit": 100},
+                f"{config.CLOB_HOST}/book",
+                params={"token_id": token_id},
                 timeout=10,
             )
             if resp.status_code == 200:
-                data = resp.json()
-                return data if isinstance(data, list) else data.get("data", [])
+                book = resp.json()
+                return {
+                    "bids": [{"price": float(b["price"]), "size": float(b["size"])}
+                             for b in (book.get("bids") or [])[:5]],
+                    "asks": [{"price": float(a["price"]), "size": float(a["size"])}
+                             for a in (book.get("asks") or [])[:5]],
+                    "last_trade_price": book.get("last_trade_price", ""),
+                }
         except Exception:
             pass
-        return []
+        return {"bids": [], "asks": [], "last_trade_price": ""}
 
     # ── market selection & state ────────────────────────────────────────────
 
     def select_markets(self, raw: List[dict]) -> List[dict]:
+        """Filter and rank markets by tradability."""
         scored: List[Tuple[float, dict]] = []
         for m in raw:
             try:
-                volume = float(m.get("volume", 0) or 0)
-                liquidity = float(m.get("liquidity", 0) or 0)
-                tokens = m.get("tokens", [])
-                if not tokens:
+                vol24 = float(m.get("volume24hr", 0) or 0)
+                liquidity = float(m.get("liquidityNum", 0) or m.get("liquidity", 0) or 0)
+
+                if vol24 < config.MIN_VOLUME_24H:
                     continue
-                yes_price = float(tokens[0].get("price", 0.5) or 0.5)
-                if yes_price < 0.08 or yes_price > 0.92:
+                if liquidity < config.MIN_LIQUIDITY:
                     continue
-                score = volume * 0.6 + liquidity * 0.4
+
+                # Parse prices from outcomePrices JSON string
+                prices_str = m.get("outcomePrices", "[]")
+                prices_list = json.loads(prices_str) if isinstance(prices_str, str) else prices_str
+                if not prices_list:
+                    continue
+                yes_price = float(prices_list[0])
+
+                if yes_price < config.PRICE_RANGE_MIN or yes_price > config.PRICE_RANGE_MAX:
+                    continue
+
+                # Score: prefer high volume, good liquidity, prices near 0.5
+                edge_potential = 1.0 - abs(yes_price - 0.5) * 2  # peaks at 0.5
+                score = vol24 * 0.4 + liquidity * 0.3 + edge_potential * 10000 * 0.3
                 scored.append((score, m))
-            except (ValueError, TypeError):
+            except (ValueError, TypeError, json.JSONDecodeError):
                 continue
+
         scored.sort(key=lambda x: x[0], reverse=True)
-        selected = [m for _, m in scored[: config.MAX_CONCURRENT_MARKETS]]
-        add_log(f"🎯 Tracking {len(selected)} markets")
+        selected = [m for _, m in scored[:config.MAX_CONCURRENT_MARKETS]]
+        add_log(f"🎯 Selected {len(selected)} tradeable markets")
         return selected
 
     def upsert_market(self, m: dict):
-        cid = m.get("condition_id", "")
-        tokens = m.get("tokens", [])
-        if not cid or not tokens:
+        """Parse Gamma API market data and upsert into state."""
+        cid = m.get("conditionId", "") or m.get("condition_id", "")
+        if not cid:
             return
+
+        # Parse token IDs from clobTokenIds JSON string
+        clob_tokens_str = m.get("clobTokenIds", "[]")
+        try:
+            token_ids = json.loads(clob_tokens_str) if isinstance(clob_tokens_str, str) else clob_tokens_str
+        except (json.JSONDecodeError, TypeError):
+            token_ids = []
+
+        # Parse prices from outcomePrices JSON string
+        prices_str = m.get("outcomePrices", "[]")
+        try:
+            prices_list = json.loads(prices_str) if isinstance(prices_str, str) else prices_str
+        except (json.JSONDecodeError, TypeError):
+            prices_list = []
+
+        if not token_ids or not prices_list:
+            return
+
+        yes_price = float(prices_list[0]) if prices_list else 0.5
 
         with _state_lock:
             if cid not in _bot_state.markets:
                 _bot_state.markets[cid] = {
                     "condition_id": cid,
                     "question": (m.get("question") or "Unknown")[:80],
-                    "token_id_yes": tokens[0].get("token_id", ""),
-                    "token_id_no": tokens[1].get("token_id", "") if len(tokens) > 1 else "",
+                    "description": (m.get("description") or "")[:500],
+                    "end_date": m.get("endDate", ""),
+                    "token_id_yes": token_ids[0] if token_ids else "",
+                    "token_id_no": token_ids[1] if len(token_ids) > 1 else "",
                     "current_price": 0.5,
                     "prices": [],
                     "timestamps": [],
@@ -487,20 +533,40 @@ class PolyBot:
                     "liquidity_ids": [],
                     "last_signal": "",
                     "macd_value": 0.0,
-                    "cvd_value": 0.0,
+                    "momentum": 0.0,
                     "peak_price": 0.0,
                     "trailing_stop": 0.0,
                     "take_profit": 0.0,
+                    # Gamma API metadata
+                    "volume_24h": 0.0,
+                    "liquidity": 0.0,
+                    "change_1h": 0.0,
+                    "change_1d": 0.0,
+                    "change_1w": 0.0,
+                    "spread": 0.0,
+                    "best_bid": 0.0,
+                    "best_ask": 0.0,
                 }
 
             ms = _bot_state.markets[cid]
-            price = float(tokens[0].get("price", 0.5) or 0.5)
-            ms["current_price"] = price
-            ms["prices"].append(price)
+            ms["current_price"] = yes_price
+            ms["prices"].append(yes_price)
             ms["timestamps"].append(datetime.now(timezone.utc).isoformat())
             if len(ms["prices"]) > 300:
                 ms["prices"] = ms["prices"][-300:]
                 ms["timestamps"] = ms["timestamps"][-300:]
+
+            # Update Gamma API metadata each scan
+            ms["volume_24h"] = float(m.get("volume24hr", 0) or 0)
+            ms["liquidity"] = float(m.get("liquidityNum", 0) or m.get("liquidity", 0) or 0)
+            ms["change_1h"] = float(m.get("oneHourPriceChange", 0) or 0)
+            ms["change_1d"] = float(m.get("oneDayPriceChange", 0) or 0)
+            ms["change_1w"] = float(m.get("oneWeekPriceChange", 0) or 0)
+            ms["spread"] = float(m.get("spread", 0) or 0)
+            ms["best_bid"] = float(m.get("bestBid", 0) or 0)
+            ms["best_ask"] = float(m.get("bestAsk", 0) or 0)
+            ms["description"] = (m.get("description") or ms.get("description", ""))[:500]
+            ms["end_date"] = m.get("endDate", "") or ms.get("end_date", "")
 
     # ── cooldown check ───────────────────────────────────────────────────────
 
@@ -574,7 +640,7 @@ class PolyBot:
             self.set_cooldown(cid)
             save_state()
 
-    # ── analysis pipeline ───────────────────────────────────────────────────
+    # ── analysis pipeline (Claude-First) ──────────────────────────────────────
 
     async def analyze_market(self, cid: str) -> Optional[dict]:
         ms = _bot_state.markets.get(cid)
@@ -593,60 +659,69 @@ class PolyBot:
         if len(prices) < config.DATA_POINTS_MIN:
             return None
 
-        # 1) MACD
+        # 1) Momentum from Gamma API (quick, no API call)
+        mom_dir, mom_str = self.signal_engine.momentum_signal(ms)
+        ms["momentum"] = mom_str
+
+        # 2) MACD if enough data (optional, tertiary)
         macd_dir, macd_str = self.signal_engine.macd_signal(prices)
         ms["macd_value"] = macd_str
 
-        # 2) CVD
-        trades = await self.fetch_trades(ms["token_id_yes"])
-        cvd_dir, cvd_val = self.signal_engine.cvd_signal(trades)
-        ms["cvd_value"] = cvd_val
-
-        if macd_dir == "NEUTRAL":
-            ms["last_signal"] = "NEUTRAL"
-            return None
-
-        # Agreement check
-        agree = (macd_dir == cvd_dir) or cvd_dir == "NEUTRAL"
-        if not agree:
-            ms["last_signal"] = f"CONFLICT {macd_dir}/{cvd_dir}"
-            return None
-
-        # 3) Claude gate
+        # 3) Claude AI — PRIMARY STRATEGY
         if self.claude:
-            confirmed, conf, analysis = self.claude.confirm_signal(
+            trade_signal, action, confidence, est_prob, analysis = self.claude.analyze_market(
                 market_question=ms["question"],
+                description=ms.get("description", ""),
                 current_price=ms["current_price"],
-                macd_signal=macd_dir,
-                macd_strength=macd_str,
-                cvd_signal=cvd_dir,
-                cvd_value=cvd_val,
-                recent_prices=prices,
+                end_date=ms.get("end_date", ""),
+                volume_24h=ms.get("volume_24h", 0),
+                liquidity=ms.get("liquidity", 0),
+                change_1h=ms.get("change_1h", 0),
+                change_1d=ms.get("change_1d", 0),
+                change_1w=ms.get("change_1w", 0),
+                spread=ms.get("spread", 0),
             )
-            add_log(f"🤖 Claude → {ms['question'][:35]}… {analysis}")
-            if not confirmed:
-                ms["last_signal"] = f"REJECTED (conf {conf:.0%})"
+            add_log(f"🤖 Claude → {ms['question'][:35]}… {analysis[:80]}")
+
+            if not trade_signal:
+                ms["last_signal"] = f"HOLD (conf {confidence:.0%})"
                 return None
-            ms["last_signal"] = f"{macd_dir} ✅ (conf {conf:.0%})"
+
+            # Momentum confirmation (bonus, not required)
+            if config.MOMENTUM_ENABLED and mom_dir != "NEUTRAL":
+                expected_dir = "BUY" if action == "BUY_YES" else "SELL"
+                if mom_dir == expected_dir:
+                    add_log(f"📈 Momentum confirms {action}")
+                # Don't block on momentum disagreement — Claude is primary
+
+            ms["last_signal"] = f"{action} ✅ (conf {confidence:.0%})"
             return {
                 "cid": cid,
-                "action": macd_dir,
-                "confidence": conf,
+                "action": action,
+                "confidence": confidence,
+                "est_prob": est_prob,
                 "macd_str": macd_str,
-                "cvd_val": cvd_val,
+                "mom_str": mom_str,
             }
         else:
-            # No Claude — require both MACD + CVD agreement
-            if macd_dir != cvd_dir:
-                ms["last_signal"] = f"NO‑AI CONFLICT"
+            # No Claude — use momentum + MACD agreement (fallback)
+            if mom_dir == "NEUTRAL" and macd_dir == "NEUTRAL":
+                ms["last_signal"] = "NEUTRAL"
                 return None
-            ms["last_signal"] = f"{macd_dir} ✅ (no‑AI)"
+            # Prefer non-neutral signal
+            direction = mom_dir if mom_dir != "NEUTRAL" else macd_dir
+            if direction == "NEUTRAL":
+                ms["last_signal"] = "NEUTRAL"
+                return None
+            action = "BUY_YES" if direction == "BUY" else "BUY_NO"
+            ms["last_signal"] = f"{action} (no-AI, momentum)"
             return {
                 "cid": cid,
-                "action": macd_dir,
+                "action": action,
                 "confidence": 0.5,
+                "est_prob": ms["current_price"],
                 "macd_str": macd_str,
-                "cvd_val": cvd_val,
+                "mom_str": mom_str,
             }
 
     # ── execution ───────────────────────────────────────────────────────────
@@ -656,12 +731,13 @@ class PolyBot:
         if not ms:
             return
 
+        action = sig["action"]  # BUY_YES or BUY_NO
         price = ms["current_price"]
 
-        # Dynamic size: min of configured size OR 5% of balance
+        # Dynamic size: min of configured size OR % of balance
         max_risk = _bot_state.balance * config.MAX_EXPOSURE_PCT
         size = min(config.ORDER_SIZE_USDC, max_risk)
-        if size < 0.5:
+        if size < 1.0:
             add_log("⚠️ Order too small — balance too low", "WARNING")
             return
 
@@ -674,20 +750,31 @@ class PolyBot:
             add_log(f"⚠️ Market limit — {ms['question'][:30]}", "WARNING")
             return
 
-        action = sig["action"]
-        token_id = ms["token_id_yes"] if action == "BUY" else ms["token_id_no"]
+        # Determine token and side
+        if action == "BUY_YES":
+            token_id = ms["token_id_yes"]
+            order_price = price
+            position_side = "YES"
+        else:  # BUY_NO
+            token_id = ms["token_id_no"]
+            order_price = 1.0 - price  # NO token price
+            position_side = "NO"
+
         success = False
 
         if _bot_state.paper_mode:
             success = True
-            add_log(f"📝 PAPER {action} | {ms['question'][:40]} @ {price:.4f} × ${size:.2f}")
+            add_log(f"📝 PAPER {action} | {ms['question'][:40]} @ {price:.3f} × ${size:.2f}")
         else:
-            add_log(f"🔴 LIVE ORDER attempt: {action} | {ms['question'][:40]} @ {price:.4f} × ${size:.2f}", "INFO")
+            if not self.clob:
+                add_log("⚠️ No CLOB connection — queuing for next cycle", "WARNING")
+                return
+            add_log(f"🔴 LIVE {action} | {ms['question'][:40]} @ {order_price:.3f} × ${size:.2f}", "INFO")
             try:
                 from py_clob_client.clob_types import OrderArgs
 
                 order_args = OrderArgs(
-                    price=round(price, 2),
+                    price=round(order_price, 2),
                     size=round(size, 2),
                     side="BUY",
                     token_id=token_id,
@@ -696,7 +783,7 @@ class PolyBot:
                 resp = self.clob.post_order(signed)
                 if resp and (resp.get("success") or resp.get("orderID")):
                     success = True
-                    add_log(f"🎯 LIVE FILLED {action} | {ms['question'][:40]} @ {price:.4f} × ${size:.2f}", "INFO")
+                    add_log(f"🎯 LIVE FILLED {action} | {ms['question'][:40]}", "INFO")
                 else:
                     add_log(f"❌ Order rejected: {resp}", "ERROR")
             except Exception as exc:
@@ -704,24 +791,22 @@ class PolyBot:
 
         if success:
             with _state_lock:
-                ms["position_side"] = "YES" if action == "BUY" else "NO"
+                ms["position_side"] = position_side
                 ms["position_size"] += size
                 ms["entry_price"] = price
-                ms["peak_price"] = price  # init trailing stop reference
+                ms["peak_price"] = price
 
-                _bot_state.trades.append(
-                    {
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
-                        "market": ms["question"][:60],
-                        "side": action,
-                        "price": price,
-                        "size": round(size, 2),
-                        "pnl": 0.0,
-                        "source": "MACD+CVD+Claude",
-                        "confidence": sig["confidence"],
-                        "mode": "PAPER" if _bot_state.paper_mode else "LIVE",
-                    }
-                )
+                _bot_state.trades.append({
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "market": ms["question"][:60],
+                    "side": action,
+                    "price": price,
+                    "size": round(size, 2),
+                    "pnl": 0.0,
+                    "source": "Claude AI",
+                    "confidence": sig["confidence"],
+                    "mode": "PAPER" if _bot_state.paper_mode else "LIVE",
+                })
                 _bot_state.total_trades += 1
                 if len(_bot_state.trades) > 1000:
                     _bot_state.trades = _bot_state.trades[-1000:]
@@ -808,7 +893,7 @@ class PolyBot:
             # 0  Sync balance
             self.sync_balance()
 
-            # 1  Discover
+            # 1  Discover markets from Gamma API
             raw = await self.fetch_markets()
             if raw:
                 for m in self.select_markets(raw):
@@ -822,19 +907,23 @@ class PolyBot:
                     break
                 await self.check_exit_conditions(cid)
 
-            # 3  Analyse + Execute
+            # 3  Analyse + Execute (Claude analyzes each market)
+            analyzed = 0
             for cid in list(_bot_state.markets.keys()):
                 if not self.running:
                     break
                 sig = await self.analyze_market(cid)
                 if sig:
                     await self.execute_signal(sig)
-                await self.refresh_liquidity(cid)
-                await asyncio.sleep(0.3)
+                analyzed += 1
+                # Brief pause between market analyses to avoid rate limits
+                if analyzed % 5 == 0:
+                    await asyncio.sleep(1)
 
             # 4  P&L
             self.update_pnl()
             save_state()
+            add_log(f"📊 Cycle done: {len(_bot_state.markets)} markets, {_bot_state.total_trades} trades, P&L: ${_bot_state.total_pnl:+.2f}")
 
         except Exception as exc:
             add_log(f"Cycle error: {exc}", "ERROR")
