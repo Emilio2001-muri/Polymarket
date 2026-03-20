@@ -379,15 +379,15 @@ with st.sidebar:
             except Exception as exc:
                 bot.clob_error = str(exc)
         if bot.clob is not None:
-            # Sync real balance immediately when CLOB is connected
-            bot.sync_balance()
+            # Sync real balance silently (no log spam on every Streamlit rerun)
+            bot.sync_balance(log=False)
             st.success(f"🔴 LIVE MODE — ${state.balance:,.2f} USDC")
         else:
             err_msg = getattr(bot, "clob_error", "") or "connecting…"
             st.warning(f"⚠️ CLOB connecting… {err_msg[:60]}")
             st.caption("Bot will retry each cycle. Orders queue until connected.")
 
-    config.ORDER_SIZE_USDC = st.slider("💰 Order Size ($)", 1.0, 50.0, config.ORDER_SIZE_USDC, 1.0)
+    config.ORDER_SIZE_USDC = st.slider("💰 Order Size ($)", 5.0, 50.0, max(config.ORDER_SIZE_USDC, 5.0), 1.0)
     config.MAX_CONCURRENT_MARKETS = st.slider("📊 Max Markets", 5, 30, config.MAX_CONCURRENT_MARKETS)
     config.SCAN_INTERVAL_SECONDS = st.slider("⏱ Scan Interval (s)", 10, 120, config.SCAN_INTERVAL_SECONDS)
     config.CLAUDE_CONFIDENCE_MIN = st.slider("🧠 Claude Min Conf", 0.3, 0.95, config.CLAUDE_CONFIDENCE_MIN, 0.05)

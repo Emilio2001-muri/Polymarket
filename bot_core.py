@@ -375,7 +375,7 @@ class PolyBot:
 
     # ── balance sync ────────────────────────────────────────────────────────
 
-    def sync_balance(self):
+    def sync_balance(self, log: bool = True):
         """Read real wallet balance from CLOB or set paper default."""
         if self.clob and not _bot_state.paper_mode:
             try:
@@ -390,20 +390,23 @@ class PolyBot:
                     real_bal = float(bal_resp.get("balance", 0)) / 1e6  # USDC 6 decimals
                 else:
                     real_bal = float(getattr(bal_resp, "balance", 0)) / 1e6
+                prev = _bot_state.real_balance
                 with _state_lock:
                     _bot_state.real_balance = round(real_bal, 2)
                     _bot_state.balance = _bot_state.real_balance
                     if _bot_state.initial_balance == 0:
                         _bot_state.initial_balance = _bot_state.real_balance
-                add_log(f"💰 Real balance: ${_bot_state.real_balance:.2f}", "INFO")
+                # Only log if balance changed or explicitly requested
+                if log and abs(prev - _bot_state.real_balance) >= 0.01:
+                    add_log(f"💰 Real balance: ${_bot_state.real_balance:.2f}", "INFO")
             except Exception as exc:
-                add_log(f"⚠️ Balance fetch failed: {exc}", "WARNING")
+                if log:
+                    add_log(f"⚠️ Balance fetch failed: {exc}", "WARNING")
         else:
             with _state_lock:
                 if _bot_state.balance == 0:
                     _bot_state.balance = 1000.0
                     _bot_state.initial_balance = 1000.0
-                add_log(f"📝 Paper balance: ${_bot_state.balance:.2f}", "INFO")
 
     # ── market discovery (Gamma API) ────────────────────────────────────────
 
@@ -735,10 +738,12 @@ class PolyBot:
         price = ms["current_price"]
 
         # Dynamic size: min of configured size OR % of balance
+        # Polymarket minimum order size is 5 shares
         max_risk = _bot_state.balance * config.MAX_EXPOSURE_PCT
-        size = min(config.ORDER_SIZE_USDC, max_risk)
-        if size < 1.0:
-            add_log("⚠️ Order too small — balance too low", "WARNING")
+        size = max(config.ORDER_SIZE_USDC, 5.0)  # enforce Polymarket minimum
+        size = min(size, max_risk)
+        if size < 5.0:
+            add_log("⚠️ Order too small (min $5) — balance too low", "WARNING")
             return
 
         # Exposure guards
@@ -798,26 +803,17 @@ class PolyBot:
                 else:
                     add_log(f"❌ Order rejected: {resp}", "ERROR")
             except Exception as exc:
-                err_msg = str(exc)
                 status = getattr(exc, "status_code", None)
-                detail = getattr(exc, "error_message", "")
-                add_log(f"❌ Execution error (status={status}): {err_msg} | detail={detail}", "ERROR")
-
-                # On 403/401: re-derive API key and retry once
-                if status in (401, 403):
-                    add_log("🔄 Re-deriving API key and retrying…", "INFO")
-                    try:
-                        creds = self.clob.derive_api_key()
-                        self.clob.set_api_creds(creds)
-                        signed = self.clob.create_order(order_args)
-                        resp = self.clob.post_order(signed)
-                        if resp and (resp.get("success") or resp.get("orderID")):
-                            success = True
-                            add_log(f"🎯 RETRY FILLED {action} | {ms['question'][:40]}", "INFO")
-                        else:
-                            add_log(f"❌ Retry rejected: {resp}", "ERROR")
-                    except Exception as exc2:
-                        add_log(f"❌ Retry also failed: {exc2}", "ERROR")
+                detail = getattr(exc, "error_msg", "")
+                if status == 403:
+                    add_log(
+                        f"❌ Order BLOCKED (403): {detail} — "
+                        "Polymarket blocks trading from US-based servers. "
+                        "Run the bot locally or on a non-US server for live trading.",
+                        "ERROR",
+                    )
+                else:
+                    add_log(f"❌ Execution error (status={status}): {detail or exc}", "ERROR")
 
         if success:
             with _state_lock:
@@ -920,16 +916,8 @@ class PolyBot:
             if not config.PAPER_TRADING and self.clob is None:
                 self.init_clob()
 
-            # Refresh API creds every cycle to prevent staleness (403 errors)
-            if self.clob and not config.PAPER_TRADING:
-                try:
-                    creds = self.clob.derive_api_key()
-                    self.clob.set_api_creds(creds)
-                except Exception as exc:
-                    add_log(f"⚠️ API key refresh failed: {exc}", "WARNING")
-
-            # 0  Sync balance
-            self.sync_balance()
+            # 0  Sync balance (log=True so changes are reported once per cycle)
+            self.sync_balance(log=True)
 
             # 1  Discover markets from Gamma API
             raw = await self.fetch_markets()
