@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: polybot
+    runtime: docker
+    region: frankfurt
+    plan: free
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: PRIVATE_KEY
+        sync: false
+      - key: FUNDER_ADDRESS
+        sync: false

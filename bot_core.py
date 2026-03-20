@@ -841,15 +841,9 @@ class PolyBot:
                 detail = getattr(exc, "error_msg", "")
                 if status == 403:
                     add_log(
-                        "❌ Geo-blocked (403) — switching to PAPER mode. "
-                        "Live trading requires running locally (not US cloud servers).",
+                        "❌ Geo-blocked (403) — deploy on a non-US server (Render Frankfurt) for live trading.",
                         "ERROR",
                     )
-                    # Auto-switch to paper mode to stop wasting Claude calls on blocked orders
-                    with _state_lock:
-                        config.PAPER_TRADING = True
-                        _bot_state.paper_mode = True
-                    return  # don't record as successful trade
                 else:
                     add_log(f"❌ Execution error (status={status}): {detail or exc}", "ERROR")
 

@@ -1,0 +1,10 @@
+__pycache__
+*.pyc
+.env
+bot_state.json
+bot.log
+.git
+.devcontainer
+backtest_results.*
+README.md
+deployment_guide.md
