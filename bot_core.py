@@ -773,8 +773,19 @@ class PolyBot:
             try:
                 from py_clob_client.clob_types import OrderArgs
 
+                # Resolve tick size for proper price rounding
+                try:
+                    tick = float(self.clob.get_tick_size(token_id))
+                except Exception:
+                    tick = 0.01
+                # Round price to tick precision (0.01 → 2 decimals, 0.001 → 3)
+                decimals = max(2, len(str(tick).rstrip('0').split('.')[-1]))
+                rounded_price = round(order_price, decimals)
+                # Ensure price in valid range
+                rounded_price = max(tick, min(rounded_price, 1.0 - tick))
+
                 order_args = OrderArgs(
-                    price=round(order_price, 2),
+                    price=rounded_price,
                     size=round(size, 2),
                     side="BUY",
                     token_id=token_id,
@@ -783,11 +794,30 @@ class PolyBot:
                 resp = self.clob.post_order(signed)
                 if resp and (resp.get("success") or resp.get("orderID")):
                     success = True
-                    add_log(f"🎯 LIVE FILLED {action} | {ms['question'][:40]}", "INFO")
+                    add_log(f"🎯 LIVE FILLED {action} | {ms['question'][:40]} | orderID={resp.get('orderID','')[:20]}", "INFO")
                 else:
                     add_log(f"❌ Order rejected: {resp}", "ERROR")
             except Exception as exc:
-                add_log(f"❌ Execution error: {exc}", "ERROR")
+                err_msg = str(exc)
+                status = getattr(exc, "status_code", None)
+                detail = getattr(exc, "error_message", "")
+                add_log(f"❌ Execution error (status={status}): {err_msg} | detail={detail}", "ERROR")
+
+                # On 403/401: re-derive API key and retry once
+                if status in (401, 403):
+                    add_log("🔄 Re-deriving API key and retrying…", "INFO")
+                    try:
+                        creds = self.clob.derive_api_key()
+                        self.clob.set_api_creds(creds)
+                        signed = self.clob.create_order(order_args)
+                        resp = self.clob.post_order(signed)
+                        if resp and (resp.get("success") or resp.get("orderID")):
+                            success = True
+                            add_log(f"🎯 RETRY FILLED {action} | {ms['question'][:40]}", "INFO")
+                        else:
+                            add_log(f"❌ Retry rejected: {resp}", "ERROR")
+                    except Exception as exc2:
+                        add_log(f"❌ Retry also failed: {exc2}", "ERROR")
 
         if success:
             with _state_lock:
@@ -889,6 +919,14 @@ class PolyBot:
             # If live mode requested but no CLOB yet, retry connection
             if not config.PAPER_TRADING and self.clob is None:
                 self.init_clob()
+
+            # Refresh API creds every cycle to prevent staleness (403 errors)
+            if self.clob and not config.PAPER_TRADING:
+                try:
+                    creds = self.clob.derive_api_key()
+                    self.clob.set_api_creds(creds)
+                except Exception as exc:
+                    add_log(f"⚠️ API key refresh failed: {exc}", "WARNING")
 
             # 0  Sync balance
             self.sync_balance()
