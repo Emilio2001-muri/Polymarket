@@ -387,7 +387,7 @@ with st.sidebar:
             st.warning(f"⚠️ CLOB connecting… {err_msg[:60]}")
             st.caption("Bot will retry each cycle. Orders queue until connected.")
 
-    config.ORDER_SIZE_USDC = st.slider("💰 Order Size ($)", 5.0, 50.0, max(config.ORDER_SIZE_USDC, 5.0), 1.0)
+    config.ORDER_SIZE_USDC = st.slider("💰 Order Size ($)", 1.0, 50.0, config.ORDER_SIZE_USDC, 1.0)
     config.MAX_CONCURRENT_MARKETS = st.slider("📊 Max Markets", 5, 30, config.MAX_CONCURRENT_MARKETS)
     config.SCAN_INTERVAL_SECONDS = st.slider("⏱ Scan Interval (s)", 10, 120, config.SCAN_INTERVAL_SECONDS)
     config.CLAUDE_CONFIDENCE_MIN = st.slider("🧠 Claude Min Conf", 0.3, 0.95, config.CLAUDE_CONFIDENCE_MIN, 0.05)

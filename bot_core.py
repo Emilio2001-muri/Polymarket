@@ -737,13 +737,11 @@ class PolyBot:
         action = sig["action"]  # BUY_YES or BUY_NO
         price = ms["current_price"]
 
-        # Dynamic size: min of configured size OR % of balance
-        # Polymarket minimum order size is 5 shares
+        # Dynamic size: configured order size, capped at % of balance
         max_risk = _bot_state.balance * config.MAX_EXPOSURE_PCT
-        size = max(config.ORDER_SIZE_USDC, 5.0)  # enforce Polymarket minimum
-        size = min(size, max_risk)
-        if size < 5.0:
-            add_log("⚠️ Order too small (min $5) — balance too low", "WARNING")
+        size = min(config.ORDER_SIZE_USDC, max_risk)
+        if size < 1.0:
+            add_log("⚠️ Order too small — balance too low", "WARNING")
             return
 
         # Exposure guards

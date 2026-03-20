@@ -50,7 +50,7 @@ MACD_SIGNAL = 6
 # Trading Parameters
 # ---------------------------------------------------------------------------
 MAX_CONCURRENT_MARKETS = 15
-ORDER_SIZE_USDC = 5.0           # base order size (Polymarket minimum is 5)
+ORDER_SIZE_USDC = 5.0           # base order size in USD
 MAX_POSITION_PER_MARKET = 25.0  # max exposure per market
 TOTAL_MAX_EXPOSURE = 200.0      # total portfolio max
 SLIPPAGE_TOLERANCE = 0.02
@@ -58,7 +58,7 @@ SLIPPAGE_TOLERANCE = 0.02
 # ---------------------------------------------------------------------------
 # Risk Management
 # ---------------------------------------------------------------------------
-MAX_EXPOSURE_PCT = 0.10         # max 10% of balance per trade
+MAX_EXPOSURE_PCT = 0.25         # max 25% of balance per trade
 TRAILING_STOP_PCT = 0.10        # 10% trailing stop
 TAKE_PROFIT_PCT = 0.20          # 20% take-profit
 COOLDOWN_SECONDS = 180          # 3 min cooldown per market after trade
